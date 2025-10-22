@@ -117,7 +117,7 @@ private struct LaunchpadItemButtonContent: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) { // invece di 8
             ZStack {
                 let renderedIcon: NSImage = {
                     switch item {
@@ -188,6 +188,7 @@ private struct LaunchpadItemButtonContent: View {
                     .truncationMode(.tail)
                     .frame(width: labelWidth)
                     .foregroundStyle(isMissingItem ? Color.secondary : Color.primary)
+                    .padding(.top, -2) // margine extra sopra il testo
             }
         }
         .padding(8)
@@ -206,13 +207,13 @@ private struct LaunchpadItemButtonContent: View {
                 }
             }
         }
-        .onChange(of: shouldAllowHover) { allow in
-            if !allow {
+        .onChange(of: shouldAllowHover) {
+            if !shouldAllowHover {
                 isHovered = false
             }
         }
-        .onChange(of: hoverMagnificationEnabled) { enabled in
-            if !enabled {
+        .onChange(of: hoverMagnificationEnabled) { oldValue, newValue in
+            if !newValue {
                 isHovered = false
             }
         }

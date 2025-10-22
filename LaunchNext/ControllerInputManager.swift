@@ -97,10 +97,6 @@ final class ControllerInputManager: ObservableObject {
         let identifier = ObjectIdentifier(controller)
         directionStates[identifier] = DirectionState()
 
-        controller.controllerPausedHandler = { [weak self] _ in
-            self?.emit(.cancel)
-        }
-
         if let extended = controller.extendedGamepad {
             configure(gamepad: extended, controller: controller)
         }
@@ -118,8 +114,6 @@ final class ControllerInputManager: ObservableObject {
                 emit(.stop(direction))
             }
         }
-
-        controller.controllerPausedHandler = nil
 
         if let extended = controller.extendedGamepad {
             extended.dpad.valueChangedHandler = nil

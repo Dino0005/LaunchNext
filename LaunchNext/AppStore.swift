@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 import Carbon
 import Carbon.HIToolbox
 import ServiceManagement
+import UserNotifications
 
 enum AppearancePreference: String, CaseIterable, Identifiable {
     case system
@@ -1337,6 +1338,14 @@ final class AppStore: ObservableObject {
         }
 
         syncLoginItemStatusFromSystem()
+        // Richiedi permessi per le notifiche di aggiornamento
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if let error = error {
+                NSLog("LaunchNext: Notification permission error: \(error)")
+            }
+            // Non è necessario fare nulla se i permessi non vengono concessi
+            // Le notifiche semplicemente non appariranno
+        }
     }
 
     func syncLoginItemStatusFromSystem() {
@@ -2092,11 +2101,92 @@ final class AppStore: ObservableObject {
 
         guard relevant else { return }
 
-        let delay: TimeInterval = isMount ? 1.0 : 0.2
+        // ⏱ aumenta leggermente il delay per dare tempo al sistema di montare pienamente il volume
+        let delay: TimeInterval = isMount ? 3.0 : 0.2
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
+
+            if isMount {
+                //FIX: Quando il disco viene montato, forza il reload delle icone
+                NSLog("LaunchNext: Volume \(volumePath) mounted — refreshing app icons")
+                
+                // Identifica le app che erano missing e ora sono disponibili
+                let appsOnVolume = self.items.compactMap { item -> String? in
+                    switch item {
+                    case .missingApp(let placeholder):
+                        if placeholder.bundlePath.hasPrefix(volumePath) {
+                            return placeholder.bundlePath
+                        }
+                    case .app(let app):
+                        if app.url.path.hasPrefix(volumePath) {
+                            return app.url.path
+                        }
+                    default:
+                        break
+                    }
+                    return nil
+                }
+                
+                // Forza il reload di queste app con icone fresche
+                if !appsOnVolume.isEmpty {
+                    for appPath in appsOnVolume {
+                        let url = URL(fileURLWithPath: appPath)
+                        
+                        // Skip se il file non esiste più
+                        guard FileManager.default.fileExists(atPath: appPath) else { continue }
+                        
+                        // Ricarica l'app con icona fresca (forza rigenerazione)
+                        let freshApp = self.appInfo(from: url)
+                        let standardPath = self.standardizedFilePath(appPath)
+                        
+                        // Aggiorna nell'array apps
+                        if let appIndex = self.apps.firstIndex(where: {
+                            self.standardizedFilePath($0.url.path) == standardPath
+                        }) {
+                            self.apps[appIndex] = freshApp
+                        }
+                        
+                        // Aggiorna in items
+                        for itemIndex in self.items.indices {
+                            switch self.items[itemIndex] {
+                            case .app(let app):
+                                if self.standardizedFilePath(app.url.path) == standardPath {
+                                    self.items[itemIndex] = .app(freshApp)
+                                }
+                            case .missingApp(let placeholder):
+                                if self.standardizedFilePath(placeholder.bundlePath) == standardPath {
+                                    self.items[itemIndex] = .app(freshApp)
+                                    self.clearMissingPlaceholder(for: appPath)
+                                }
+                            default:
+                                break
+                            }
+                        }
+                    }
+                    
+                    // Forza aggiornamento UI immediato
+                    self.triggerFolderUpdate()
+                    self.triggerGridRefresh()
+                }
+            }
+            
+            // Esegue sempre risincronizzazione (sia mount che unmount)
             self.restartAutoRescan()
             self.scanApplicationsWithOrderPreservation()
+
+            // Refresh placeholder dopo la scansione
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.refreshMissingPlaceholders()
+                self.triggerFolderUpdate()
+                self.triggerGridRefresh()
+                
+                // Forza un refresh completo dopo che tutto è stato scansionato
+                if isMount {
+                    NSLog("LaunchNext: Forcing complete refresh for mounted volume \(volumePath)")
+                    // Triggera lo stesso refresh che fa il pulsante "Aggiorna"
+                    self.scanApplications()
+                }
+            }
         }
     }
 
@@ -2369,60 +2459,92 @@ final class AppStore: ObservableObject {
     }
     
     func removeAppFromFolder(_ app: AppInfo, folder: FolderInfo) {
-        guard let folderIndex = folders.firstIndex(of: folder) else { return }
-        
-        
-        // 创建新的FolderInfo实例，确保SwiftUI能够检测到变化
-        var updatedFolder = folders[folderIndex]
-        updatedFolder.apps.removeAll { $0 == app }
-        
-        
-        // 如果文件夹空了，删除文件夹
-        if updatedFolder.apps.isEmpty {
-            folders.remove(at: folderIndex)
-        } else {
-            // 更新文件夹
-            folders[folderIndex] = updatedFolder
+    guard let folderIndex = folders.firstIndex(of: folder) else { return }
+    
+    // Crea nuova FolderInfo, assicura che SwiftUI rilevi il cambiamento
+    var updatedFolder = folders[folderIndex]
+    updatedFolder.apps.removeAll { $0 == app }
+    
+    // Se la cartella è vuota, rimuovila
+    if updatedFolder.apps.isEmpty {
+        folders.remove(at: folderIndex)
+    } else {
+        // Aggiorna la cartella
+        folders[folderIndex] = updatedFolder
+    }
+    
+    // Sincronizza items: aggiorna o rimuovi la cartella
+    var emptiedSlots: [Int] = []
+    for idx in items.indices {
+        if case .folder(let f) = items[idx], f.id == folder.id {
+            if updatedFolder.apps.isEmpty {
+                // Cartella vuota e rimossa, marca come empty slot
+                items[idx] = .empty(UUID().uuidString)
+                emptiedSlots.append(idx)
+            } else {
+                items[idx] = .folder(updatedFolder)
+            }
         }
+    }
+    
+    // Aggiungi l'app alla lista principale
+    apps.append(app)
+    apps.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+    // FIX: Aggiungi l'app estratta a items. Non dipendere da emptiedSlots - crea sempre un nuovo elemento
+    if let firstEmptied = emptiedSlots.first, firstEmptied < items.count {
+        // Se c'è uno slot vuoto dalla cartella rimossa, usalo
+        items[firstEmptied] = .app(app)
+    } else {
+        // NUOVO: Altrimenti, trova il primo slot empty disponibile nell'ultima pagina o aggiungi alla fine dell'ultima pagina
+        let itemsPerPage = self.itemsPerPage
+        let currentPages = (items.count + itemsPerPage - 1) / itemsPerPage
         
-        // 同步更新 items 中的该文件夹条目，避免界面继续引用旧的文件夹内容
-        var emptiedSlots: [Int] = []
-        for idx in items.indices {
-            if case .folder(let f) = items[idx], f.id == folder.id {
-                if updatedFolder.apps.isEmpty {
-                    // 文件夹已空并被删除，则将该位置标记为空槽，等待后续补位
-                    items[idx] = .empty(UUID().uuidString)
-                    emptiedSlots.append(idx)
+        if currentPages == 0 {
+            // Nessuna pagina, crea la prima
+            items.append(.app(app))
+        } else {
+            // Trova il primo empty slot nell'ultima pagina
+            let lastPageStart = (currentPages - 1) * itemsPerPage
+            let lastPageEnd = min(lastPageStart + itemsPerPage, items.count)
+            
+            var insertedInEmptySlot = false
+            for idx in lastPageStart..<lastPageEnd {
+                if case .empty = items[idx] {
+                    items[idx] = .app(app)
+                    insertedInEmptySlot = true
+                    break
+                }
+            }
+            
+            // Se non ci sono empty slots, aggiungi alla fine dell'ultima pagina
+            if !insertedInEmptySlot {
+                // Calcola quanti slot mancano per completare l'ultima pagina
+                let remainingSlots = itemsPerPage - (lastPageEnd - lastPageStart)
+                if remainingSlots > 0 {
+                    // C'è spazio nell'ultima pagina
+                    items.append(.app(app))
                 } else {
-                    items[idx] = .folder(updatedFolder)
+                    // Ultima pagina piena, crea nuova pagina
+                    items.append(.app(app))
                 }
             }
         }
-        
-        // 将应用重新添加到应用列表
-        apps.append(app)
-        apps.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-
-        // 若删除文件夹后留下空槽，优先在原位置补位，避免跨页移动
-        if let firstEmptied = emptiedSlots.first, firstEmptied < items.count {
-            items[firstEmptied] = .app(app)
-        }
-
-        // 立即触发文件夹更新，通知所有相关视图刷新图标和名称
-        triggerFolderUpdate()
-
-        // 触发网格视图刷新，确保界面立即更新
-        triggerGridRefresh()
-
-        // 仅在页内压缩空槽
-        compactItemsWithinPages()
-        removeEmptyPages()
-
-        // 刷新缓存，确保搜索时能找到从文件夹移除的应用（在重建之后刷新）
-        refreshCacheAfterFolderOperation()
-
-        saveAllOrder()
     }
+
+    // Trigger aggiornamenti UI
+    triggerFolderUpdate()
+    triggerGridRefresh()
+
+    // Comprimi solo all'interno delle pagine
+    compactItemsWithinPages()
+    removeEmptyPages()
+
+    // Aggiorna cache per la ricerca
+    refreshCacheAfterFolderOperation()
+
+    saveAllOrder()
+}
     
     func renameFolder(_ folder: FolderInfo, newName: String) {
         guard let index = folders.firstIndex(of: folder) else { return }
@@ -3587,8 +3709,6 @@ final class AppStore: ObservableObject {
                     items[itemIndex] = .folder(folder)
                     changed = true
                 }
-            case .folder:
-                break
             case .empty:
                 break
             case .missingApp:
@@ -4122,26 +4242,53 @@ final class AppStore: ObservableObject {
 
     @MainActor
     private func presentUpdateAlert(for release: UpdateRelease) {
-        let notification = NSUserNotification()
-        notification.title = localized(.updateAvailable)
-        notification.informativeText = "\(localized(.newVersion)) \(release.version)"
-        notification.hasActionButton = true
-        notification.actionButtonTitle = localized(.downloadUpdate)
-        notification.otherButtonTitle = localized(.cancel)
-        notification.userInfo = ["releaseURL": release.url.absoluteString]
-
-        NSUserNotificationCenter.default.delegate = notificationDelegate
-        NSUserNotificationCenter.default.deliver(notification)
+        // Richiedi permessi se non già concessi
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            guard granted else { return }
+            
+            let content = UNMutableNotificationContent()
+            content.title = self.localized(.updateAvailable)
+            content.body = "\(self.localized(.newVersion)) \(release.version)"
+            content.sound = .default
+            content.categoryIdentifier = "UPDATE_AVAILABLE"
+            content.userInfo = ["releaseURL": release.url.absoluteString]
+            
+            let request = UNNotificationRequest(
+                identifier: UUID().uuidString,
+                content: content,
+                trigger: nil // Mostra immediatamente
+            )
+            
+            UNUserNotificationCenter.current().add(request) { error in
+                if let error = error {
+                    NSLog("LaunchNext: Failed to show update notification: \(error)")
+                }
+            }
+        }
     }
 
     @MainActor
     private func presentUpdateFailureAlert(_ message: String) {
-        let notification = NSUserNotification()
-        notification.title = localized(.updateCheckFailed)
-        notification.informativeText = message
-
-        NSUserNotificationCenter.default.delegate = notificationDelegate
-        NSUserNotificationCenter.default.deliver(notification)
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            guard granted else { return }
+            
+            let content = UNMutableNotificationContent()
+            content.title = self.localized(.updateCheckFailed)
+            content.body = message
+            content.sound = .default
+            
+            let request = UNNotificationRequest(
+                identifier: UUID().uuidString,
+                content: content,
+                trigger: nil
+            )
+            
+            UNUserNotificationCenter.current().add(request) { error in
+                if let error = error {
+                    NSLog("LaunchNext: Failed to show error notification: \(error)")
+                }
+            }
+        }
     }
 
     @MainActor
@@ -4277,24 +4424,77 @@ final class AppStore: ObservableObject {
     }
 }
 
-private final class UpdateNotificationDelegate: NSObject, NSUserNotificationCenterDelegate {
+private final class UpdateNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     private let openHandler: (URL) -> Void
 
     init(openHandler: @escaping (URL) -> Void) {
         self.openHandler = openHandler
+        super.init()
+        
+        // Configura le categorie di notifica con azioni
+        setupNotificationCategories()
+        
+        // Imposta questo oggetto come delegate
+        UNUserNotificationCenter.current().delegate = self
     }
-
-    func userNotificationCenter(_ center: NSUserNotificationCenter, shouldPresent notification: NSUserNotification) -> Bool {
-        true
+    
+    private func setupNotificationCategories() {
+        // Azione "Download"
+        let downloadAction = UNNotificationAction(
+            identifier: "DOWNLOAD_UPDATE",
+            title: NSLocalizedString("Download", comment: "Download update action"),
+            options: [.foreground]
+        )
+        
+        // Azione "Cancel"
+        let cancelAction = UNNotificationAction(
+            identifier: "CANCEL_UPDATE",
+            title: NSLocalizedString("Cancel", comment: "Cancel update action"),
+            options: []
+        )
+        
+        // Categoria per gli aggiornamenti
+        let updateCategory = UNNotificationCategory(
+            identifier: "UPDATE_AVAILABLE",
+            actions: [downloadAction, cancelAction],
+            intentIdentifiers: [],
+            options: []
+        )
+        
+        UNUserNotificationCenter.current().setNotificationCategories([updateCategory])
     }
-
-    func userNotificationCenter(_ center: NSUserNotificationCenter, didActivate notification: NSUserNotification) {
-        guard notification.activationType == .actionButtonClicked,
-              let urlString = notification.userInfo?["releaseURL"] as? String,
-              let url = URL(string: urlString) else {
-            return
+    
+    // Mostra notifiche anche quando l'app è in primo piano
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        if #available(macOS 11.0, *) {
+            completionHandler([.banner, .sound])
+        } else {
+            completionHandler([.alert, .sound])
         }
-        openHandler(url)
+    }
+    
+    // Gestisce il click sulla notifica
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        defer { completionHandler() }
+        
+        // L'utente ha cliccato "Download"
+        if response.actionIdentifier == "DOWNLOAD_UPDATE" ||
+           response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            if let urlString = response.notification.request.content.userInfo["releaseURL"] as? String,
+               let url = URL(string: urlString) {
+                DispatchQueue.main.async {
+                    self.openHandler(url)
+                }
+            }
+        }
     }
 }
 

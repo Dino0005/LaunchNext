@@ -18,7 +18,7 @@ struct AppInfo: Identifiable, Equatable, Hashable {
         hasher.combine(url.path)
     }
 
-    // MARK: - 创建 AppInfo
+    // MARK: - 创建 AppInfo (🔧 MODIFICATO)
     static func from(url: URL, preferredName: String? = nil, customTitle: String? = nil) -> AppInfo {
         let fallbackName = normalizeCandidate(url.deletingPathExtension().lastPathComponent)
         let bundle = Bundle(url: url)
@@ -32,7 +32,9 @@ struct AppInfo: Identifiable, Equatable, Hashable {
 
         let shouldUseLocalized = shouldUseLocalizedTitles()
         let chosenName = shouldUseLocalized ? localizedName : englishName
-        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        
+        //FIX: Caricamento icone più robusto
+        let icon = loadAppIcon(for: url, bundle: bundle)
 
         if let override = customTitle.flatMap({ title -> String? in
             let normalized = normalizeCandidate(title)
@@ -162,5 +164,84 @@ struct AppInfo: Identifiable, Equatable, Hashable {
             return languages
         }
         return Locale.preferredLanguages
+    }
+    
+    // MARK: - NUOVO: Caricamento icone robusto
+    private static func loadAppIcon(for url: URL, bundle: Bundle?) -> NSImage {
+        // Metodo 1: Prova con NSWorkspace
+        let workspaceIcon = NSWorkspace.shared.icon(forFile: url.path)
+        
+        // Verifica se l'icona è valida (non quella generica)
+        let isValidIcon = workspaceIcon.representations.count > 1 || 
+                          workspaceIcon.size.width > 128
+        
+        if isValidIcon {
+            return workspaceIcon
+        }
+        
+        // Metodo 2: Carica direttamente dal bundle dell'app
+        if let bundle = bundle {
+            // Cerca il nome del file icona
+            if let iconFileName = bundle.object(forInfoDictionaryKey: "CFBundleIconFile") as? String {
+                let iconName = iconFileName.replacingOccurrences(of: ".icns", with: "")
+                
+                // Prova a caricare l'icona dal Resources
+                if let iconPath = bundle.path(forResource: iconName, ofType: "icns") {
+                    if let icon = NSImage(contentsOfFile: iconPath), 
+                       icon.isValid {
+                        return icon
+                    }
+                }
+                
+                // Prova anche senza estensione
+                if let iconPath = bundle.path(forResource: iconName, ofType: nil) {
+                    if let icon = NSImage(contentsOfFile: iconPath),
+                       icon.isValid {
+                        return icon
+                    }
+                }
+            }
+            
+            // Metodo 3: Cerca CFBundleIconName (per asset catalogs)
+            if let iconName = bundle.object(forInfoDictionaryKey: "CFBundleIconName") as? String,
+               let iconPath = bundle.pathForImageResource(iconName) {
+                if let icon = NSImage(contentsOfFile: iconPath),
+                   icon.isValid {
+                    return icon
+                }
+            }
+            
+            // Metodo 4: Cerca manualmente nella cartella Resources
+            if let resourcesPath = bundle.resourcePath {
+                let resourcesURL = URL(fileURLWithPath: resourcesPath)
+                let icnsFiles = try? FileManager.default.contentsOfDirectory(
+                    at: resourcesURL,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                ).filter { $0.pathExtension.lowercased() == "icns" }
+                
+                // Prova il primo file .icns trovato
+                if let firstIconFile = icnsFiles?.first,
+                   let icon = NSImage(contentsOfFile: firstIconFile.path),
+                   icon.isValid {
+                    return icon
+                }
+            }
+        }
+        
+        // Metodo 5: Ultimo tentativo - forza NSWorkspace con path risolto
+        let resolvedURL = url.resolvingSymlinksInPath()
+        let fallbackIcon = NSWorkspace.shared.icon(forFile: resolvedURL.path)
+        
+        return fallbackIcon
+    }
+}
+
+// MARK: - NUOVA EXTENSION: Validazione icone
+private extension NSImage {
+    var isValid: Bool {
+        return !representations.isEmpty && 
+               size.width > 0 && 
+               size.height > 0
     }
 }

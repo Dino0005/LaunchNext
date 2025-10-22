@@ -1784,7 +1784,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
                                 .foregroundStyle(.secondary)
                         }
 
-                    case .upToDate(let latest):
+                    case .upToDate(_):
                         HStack {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundStyle(.green)

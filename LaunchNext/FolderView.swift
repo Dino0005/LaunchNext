@@ -83,8 +83,8 @@ struct FolderView: View {
                 isKeyboardNavigationActive = false
             }
         }
-        .onChange(of: isTextFieldFocused) { focused in
-            if !focused && isEditingName {
+        .onChange(of: isTextFieldFocused) {
+            if !isTextFieldFocused && isEditingName {
                 finishEditing()
             }
         }
@@ -217,7 +217,7 @@ struct FolderView: View {
             .scrollIndicators(.hidden)
             .disabled(isEditingName) // 编辑状态下禁用滚动
             .onAppear { columnsCount = desiredColumns }
-            .onChange(of: geo.size) { _ in columnsCount = desiredColumns }
+            .onChange(of: geo.size) { columnsCount = desiredColumns }
 
             // 拖拽预览层
             if let draggingApp {

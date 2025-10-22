@@ -33,28 +33,23 @@ private class PageFlipManager: ObservableObject {
 }
 
 private final class FPSMonitor {
-    private var displayLink: CVDisplayLink?
-    private var lastTimestamp: Double = 0
+    private var displayLink: CADisplayLink?
+    private var lastTimestamp: CFTimeInterval = 0
     private let callback: (Double, Double) -> Void
 
     init?(callback: @escaping (Double, Double) -> Void) {
         self.callback = callback
-        var link: CVDisplayLink?
-        guard CVDisplayLinkCreateWithActiveCGDisplays(&link) == kCVReturnSuccess, let link else { return nil }
-        displayLink = link
-        let userInfo = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        CVDisplayLinkSetOutputCallback(link, { _, inNow, _, _, _, userInfo in
-            guard let userInfo else { return kCVReturnSuccess }
-            let monitor = Unmanaged<FPSMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-            monitor.step(timestamp: inNow.pointee)
-            return kCVReturnSuccess
-        }, userInfo)
-        CVDisplayLinkStart(link)
+        
+        // Usa CADisplayLink invece di CVDisplayLink
+        guard let screen = NSScreen.main else { return nil }
+        
+        let displayLink = screen.displayLink(target: self, selector: #selector(step(_:)))
+        displayLink.add(to: .main, forMode: .common)
+        self.displayLink = displayLink
     }
 
-    private func step(timestamp: CVTimeStamp) {
-        guard timestamp.videoTimeScale != 0 else { return }
-        let current = Double(timestamp.videoTime) / Double(timestamp.videoTimeScale)
+    @objc private func step(_ link: CADisplayLink) {
+        let current = link.timestamp
         guard lastTimestamp != 0 else {
             lastTimestamp = current
             return
@@ -66,9 +61,7 @@ private final class FPSMonitor {
     }
 
     func invalidate() {
-        if let link = displayLink {
-            CVDisplayLinkStop(link)
-        }
+        displayLink?.invalidate()
         displayLink = nil
     }
 
@@ -350,7 +343,7 @@ struct LaunchpadView: View {
                             let total = (config.isFullscreen ? geo.size.height * config.topPadding : 0) + proxy.size.height + extra
                             DispatchQueue.main.async { headerTotalHeight = total }
                         }
-                        .onChange(of: proxy.size) { _ in
+                        .onChange(of: proxy.size) {
                             let extra: CGFloat = 24
                             let total = (config.isFullscreen ? geo.size.height * config.topPadding : 0) + proxy.size.height + extra
                             DispatchQueue.main.async { headerTotalHeight = total }
@@ -385,22 +378,6 @@ struct LaunchpadView: View {
                     let iconSize: CGFloat = min(columnWidth, appHeight) * CGFloat(min(max(appStore.iconScale, 0.6), 1.15))
 
                     let effectivePageWidth = geo.size.width + config.pageSpacing
-
-                    // Helper: decide whether to close when tapping at a point in grid space
-                    let maybeCloseAt: (CGPoint) -> Void = { p in
-                        guard appStore.openFolder == nil, draggingItem == nil else { return }
-                        if let idx = indexAt(point: p,
-                                             in: geo.size,
-                                             pageIndex: appStore.currentPage,
-                                             columnWidth: columnWidth,
-                                             appHeight: appHeight) {
-                            if currentItems.indices.contains(idx), case .empty = currentItems[idx] {
-                                AppDelegate.shared?.hideWindow()
-                            }
-                        } else {
-                            AppDelegate.shared?.hideWindow()
-                        }
-                    }
 
                     if appStore.isInitialLoading {
                         VStack(spacing: 16) {
@@ -520,7 +497,7 @@ struct LaunchpadView: View {
                                 )
                             }
                         }
-                        .onChange(of: appStore.gridRefreshTrigger) { _ in
+                        .onChange(of: appStore.gridRefreshTrigger) {
                             DispatchQueue.main.async {
                                 captureGridGeometry(geo, columnWidth: columnWidth, appHeight: appHeight, iconSize: iconSize)
                             }
@@ -757,8 +734,8 @@ struct LaunchpadView: View {
                  appStore.currentPage = maxPageIndex
              }
           }
-          .onChange(of: isSearchFieldFocused) { _, focused in
-             if focused { isKeyboardNavigationActive = false }
+          .onChange(of: isSearchFieldFocused) {
+             if isSearchFieldFocused  { isKeyboardNavigationActive = false }
          }
          .onReceive(ControllerInputManager.shared.commands) { command in
              handleControllerCommand(command)
@@ -813,30 +790,30 @@ struct LaunchpadView: View {
             windowHiddenObserver = nil
             stopFPSMonitoring()
          }
-        .onChange(of: appStore.showFPSOverlay) { enabled in
-            if enabled {
-                startFPSMonitoring()
-            } else {
-                stopFPSMonitoring()
-                fpsValue = 0
-            }
-        }
-        .onChange(of: appStore.voiceFeedbackEnabled) { _, enabled in
-            if enabled {
-                if let idx = selectedIndex, filteredItems.indices.contains(idx) {
-                    let item = filteredItems[idx]
-                    VoiceManager.shared.announceSelection(item: item)
-                }
-            } else {
-                VoiceManager.shared.stop()
-            }
-        }
-        .onChange(of: appStore.isLayoutLocked) { _, locked in
-            guard locked else { return }
-            if let monitor = handoffEventMonitor {
-                NSEvent.removeMonitor(monitor)
-                handoffEventMonitor = nil
-            }
+         .onChange(of: appStore.showFPSOverlay) {
+             if appStore.showFPSOverlay {
+                 startFPSMonitoring()
+             } else {
+                 stopFPSMonitoring()
+                 fpsValue = 0
+             }
+         }
+         .onChange(of: appStore.voiceFeedbackEnabled) {
+             if appStore.voiceFeedbackEnabled {
+                 if let idx = selectedIndex, filteredItems.indices.contains(idx) {
+                     let item = filteredItems[idx]
+                     VoiceManager.shared.announceSelection(item: item)
+                 }
+             } else {
+                 VoiceManager.shared.stop()
+             }
+         }
+         .onChange(of: appStore.isLayoutLocked) {
+             guard appStore.isLayoutLocked else { return }
+             if let monitor = handoffEventMonitor {
+                 NSEvent.removeMonitor(monitor)
+                 handoffEventMonitor = nil
+             }
             draggingItem = nil
             pendingDropIndex = nil
             dragPreviewPosition = .zero
@@ -1049,14 +1026,14 @@ struct LaunchpadView: View {
 extension LaunchpadView {
     private func startFPSMonitoring() {
         stopFPSMonitoring()
-        if let monitor = FPSMonitor { fps, frameDelta in
+        if let monitor = FPSMonitor(callback: { fps, frameDelta in
             let clamped = max(0, min(fps, 240))
             DispatchQueue.main.async {
                 let smoothed = fpsValue * 0.8 + clamped * 0.2
                 fpsValue = smoothed
                 frameTimeMilliseconds = frameDelta * 1000
             }
-        } {
+        }) {
             fpsMonitor = monitor
         }
     }
@@ -2474,12 +2451,11 @@ extension LaunchpadView {
             }
         } else {
             // 兜底逻辑：如果没有有效的目标索引，将应用放置到当前页的末尾
-            if let draggingIndex = filteredItems.firstIndex(of: dragging) {
+            if filteredItems.firstIndex(of: dragging) != nil {
                 let currentPageStart = appStore.currentPage * config.itemsPerPage
                 let currentPageEnd = min(currentPageStart + config.itemsPerPage, appStore.items.count)
                 let targetIndex = currentPageEnd
                 
-                // 使用级联插入确保应用能正确放置
                 appStore.moveItemAcrossPagesWithCascade(item: dragging, to: targetIndex)
             }
         }

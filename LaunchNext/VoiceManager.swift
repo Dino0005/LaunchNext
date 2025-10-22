@@ -1,10 +1,11 @@
 import AppKit
 import Foundation
+import AVFoundation
 
 final class VoiceManager {
     static let shared = VoiceManager()
 
-    private let synthesizer = NSSpeechSynthesizer()
+    private let synthesizer = AVSpeechSynthesizer()
     private weak var appStore: AppStore?
     private var pendingAnnouncement: DispatchWorkItem?
 
@@ -30,7 +31,7 @@ final class VoiceManager {
         pendingAnnouncement?.cancel()
         pendingAnnouncement = nil
         if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking()
+            synthesizer.stopSpeaking(at: .immediate)
         }
     }
 
@@ -50,8 +51,13 @@ final class VoiceManager {
         guard let phrase, !phrase.isEmpty else { return }
 
         if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking()
+            synthesizer.stopSpeaking(at: .immediate)
         }
-        synthesizer.startSpeaking(phrase)
+        
+        let utterance = AVSpeechUtterance(string: phrase)
+        utterance.voice = AVSpeechSynthesisVoice(language: Locale.current.language.languageCode?.identifier ?? "en-US")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        
+        synthesizer.speak(utterance)
     }
 }

@@ -461,12 +461,12 @@ class NativeLaunchpadImporter {
     }
 
     private func findLocalApp(bundleId: String, title: String) -> AppInfo? {
-        // 优先使用 NSWorkspace 查找
-        if let appPath = NSWorkspace.shared.absolutePathForApplication(withBundleIdentifier: bundleId) {
-            return AppInfo.from(url: URL(fileURLWithPath: appPath), preferredName: title)
+        // Usa il metodo moderno invece di absolutePathForApplication (deprecato in macOS 11.0)
+        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            return AppInfo.from(url: appURL, preferredName: title)
         }
 
-        // 备用方案：在常见路径中搜索
+        // Backup: cerca nelle directory comuni
         let searchPaths = [
             "/Applications",
             "/System/Applications",
