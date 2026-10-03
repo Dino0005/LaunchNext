@@ -714,24 +714,53 @@ extension CAGridView {
 
         guard let sourceIndex = draggingIndex else { return }
         let preview: GridDropPreview
-        if let hoverIndex = gridPositionAt(point), hoverIndex != draggingIndex {
-            if items.indices.contains(hoverIndex), case .app = draggingItem,
-               isPointInFolderDropZone(point, targetIndex: hoverIndex) {
-                switch items[hoverIndex] {
-                case .app, .folder:
-                    preview = .merge(targetID: items[hoverIndex].id)
-                case .missingApp, .empty:
-                    preview = .insertion(index: hoverIndex, sourceIndex: sourceIndex,
+        if let cell = gridPositionAt(point) {
+            // Hit-test the layout as currently displayed, like the SwiftUI grid
+            // (visualItems): once a gap opens under the pointer it stays there,
+            // and a merge targets the icon actually shown in that cell, not the
+            // one that originally occupied it.
+            switch displayedItemIndex(atCell: cell, sourceIndex: sourceIndex) {
+            case nil:
+                // Over the dragged item's own gap: keep the current preview.
+                preview = dragDropPreview
+            case let shown?:
+                let canMerge: Bool = {
+                    guard items.indices.contains(shown), case .app = draggingItem else { return false }
+                    switch items[shown] {
+                    case .app, .folder: return true
+                    case .missingApp, .empty: return false
+                    }
+                }()
+                if canMerge, isPointInFolderDropZone(point, targetIndex: cell) {
+                    preview = .merge(targetID: items[shown].id)
+                } else {
+                    preview = .insertion(index: cell, sourceIndex: sourceIndex,
                                          itemCount: items.count, itemsPerPage: itemsPerPage)
                 }
-            } else {
-                preview = .insertion(index: hoverIndex, sourceIndex: sourceIndex,
-                                     itemCount: items.count, itemsPerPage: itemsPerPage)
             }
         } else {
             preview = .none
         }
         requestDropPreview(preview)
+    }
+
+    /// Original index of the item displayed in `cell` under the current drop
+    /// preview, or nil when the cell shows the dragged item's gap. Mirrors the
+    /// shifts applied by applyIconPositionUpdate().
+    func displayedItemIndex(atCell cell: Int, sourceIndex: Int) -> Int? {
+        guard case .insert(let gap) = dragDropPreview, itemsPerPage > 0,
+              gap / itemsPerPage == cell / itemsPerPage else {
+            return cell == sourceIndex ? nil : cell
+        }
+        if cell == gap { return nil }
+        if sourceIndex / itemsPerPage == gap / itemsPerPage {
+            // Same page: items between source and gap shift by one.
+            if sourceIndex < gap, cell >= sourceIndex, cell < gap { return cell + 1 }
+            if sourceIndex > gap, cell > gap, cell <= sourceIndex { return cell - 1 }
+            return cell
+        }
+        // From another page: items from the gap onward shift right.
+        return cell > gap ? cell - 1 : cell
     }
 
     func updateIconPositionsForDrag(hoverIndex: Int?) {
@@ -1230,8 +1259,13 @@ extension CAGridView {
 
     // MARK: - 边缘翻页检测
     func checkEdgeDrag(at point: CGPoint) {
-        let leftEdge = point.x < edgeDragThreshold
-        let rightEdge = point.x > bounds.width - edgeDragThreshold
+        let limits = edgeFlipLimits()
+        let leftEdge = point.x < limits.left
+        let rightEdge = point.x > limits.right
+
+        if (leftEdge || rightEdge), CACurrentMediaTime() < edgeFlipCooldownUntil {
+            return
+        }
 
         if leftEdge && currentPage > 0 {
             // 左边缘 - 翻到上一页
@@ -1243,6 +1277,20 @@ extension CAGridView {
             // 离开边缘区域 - 取消计时器
             cancelEdgeDragTimer()
         }
+    }
+
+    /// The first and last columns touch the grid edges, so an edge zone inside
+    /// the grid overlaps their drop targets. When the grid does not reach the
+    /// screen edge (windowed mode), the pointer can leave it: flip only once it
+    /// does. Otherwise (fullscreen) keep a thin zone inside the grid.
+    func edgeFlipLimits() -> (left: CGFloat, right: CGFloat) {
+        let inside = (left: edgeDragThreshold, right: bounds.width - edgeDragThreshold)
+        guard let window, let screen = window.screen else { return inside }
+        let gridOnScreen = window.convertToScreen(convert(bounds, to: nil))
+        let roomLeft = gridOnScreen.minX - screen.frame.minX
+        let roomRight = screen.frame.maxX - gridOnScreen.maxX
+        return (left: roomLeft > edgeDragThreshold ? 0 : inside.left,
+                right: roomRight > edgeDragThreshold ? bounds.width : inside.right)
     }
 
     func startEdgeDragTimer(direction: Int) {
@@ -1261,9 +1309,10 @@ extension CAGridView {
 
             self.navigateToPage(targetPage, animated: true)
             self.edgeDragTimer = nil
+            self.edgeFlipCooldownUntil = CACurrentMediaTime() + self.edgeFlipCooldown
 
             // 翻页后继续检测
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.edgeFlipCooldown) { [weak self] in
                 guard let self = self, self.isDraggingItem else { return }
                 self.checkEdgeDrag(at: self.dragCurrentPoint)
             }
@@ -1335,8 +1384,12 @@ extension CAGridView {
         let clampedX = max(0, min(localX, availableWidth - 1))
         let clampedY = max(0, min(localY, availableHeight - 1))
 
-        let col = Int(clampedX / strideX)
-        let row = Int(clampedY / strideY)
+        // Split the spacing between neighbouring cells, as the SwiftUI grid
+        // does (GeometryUtils.indexAt). Assigning the whole gap to the left
+        // cell makes it impossible to drop between two icons when dragging
+        // right-to-left.
+        let col = Int((clampedX + columnSpacing / 2) / strideX)
+        let row = Int((clampedY + rowSpacing / 2) / strideY)
 
         let clampedCol = max(0, min(col, columns - 1))
         let clampedRow = max(0, min(row, rows - 1))

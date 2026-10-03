@@ -161,7 +161,14 @@ final class CAGridView: NSView, CALayerDelegate, NSDraggingSource {
 
     // 跨页拖拽
     var edgeDragTimer: Timer?
-    let edgeDragThreshold: CGFloat = 60  // 边缘检测区域宽度
+    // After an edge flip, the next pointer move would immediately arm a new
+    // timer and keep flipping every edgeDragDelay. Hold off for a while so a
+    // pointer resting past the edge advances at most about once per second.
+    var edgeFlipCooldownUntil: CFTimeInterval = 0
+    let edgeFlipCooldown: CFTimeInterval = 0.6
+    // Matches the SwiftUI grid (PageNavigation.edgeFlipMargin). A wider zone
+    // overlaps the first/last column and flips pages while aiming at them.
+    let edgeDragThreshold: CGFloat = 15  // 边缘检测区域宽度
     let edgeDragDelay: TimeInterval = 0.4  // 触发翻页延迟
 
     // Live reorder during drag
